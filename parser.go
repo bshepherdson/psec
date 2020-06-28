@@ -62,7 +62,7 @@ func (e *parseError) Error() string {
 
 // Action is a function type that adapts parser results from raw results to more
 // meaningful results, such as AST nodes.
-type Action func(results interface{}) interface{}
+type Action func(results interface{}) (interface{}, error)
 
 // symbolTable maps rule names to their parsers.
 type symbolTable map[string]Parser
@@ -267,13 +267,13 @@ func (p *pSeqAt) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 // Stringify wraps another parser, and combines its output (which should be a
 // []byte) into a single string.
 func Stringify(p Parser) Parser {
-	return parserWithAction(p, func(raw interface{}) interface{} {
+	return parserWithAction(p, func(raw interface{}) (interface{}, error) {
 		res := raw.([]interface{})
 		out := make([]byte, len(res))
 		for i, c := range res {
 			out[i] = c.(byte)
 		}
-		return string(out)
+		return string(out), nil
 	})
 }
 
@@ -581,7 +581,11 @@ func (p *pWithAction) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	if err != nil {
 		return nil, err
 	}
-	return ps.SetValue(p.action(ps.Value())), nil
+	res, e := p.action(ps.Value())
+	if e != nil {
+		return nil, ps.Loc().mkErrorMessage(e.Error())
+	}
+	return ps.SetValue(res), nil
 }
 
 // Symbol runs another parser in the grammar by name.

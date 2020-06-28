@@ -10,13 +10,13 @@ func buildJSONParser() *Grammar {
 
 	g.AddSymbol("ws", ManyDrop(OneOf(" \t\r\n")))
 
-	g.WithAction("null", Literal("null"), func(interface{}) interface{} {
-		return nil
+	g.WithAction("null", Literal("null"), func(interface{}) (interface{}, error) {
+		return nil, nil
 	})
 
-	g.WithAction("bool", Alt(Literal("false"), Literal("true")), func(res interface{}) interface{} {
+	g.WithAction("bool", Alt(Literal("false"), Literal("true")), func(res interface{}) (interface{}, error) {
 		s := res.(string)
-		return s == "true"
+		return s == "true", nil
 	})
 
 	g.AddSymbol("string",
@@ -24,7 +24,7 @@ func buildJSONParser() *Grammar {
 
 	g.WithAction("number",
 		Seq(Optional(OneOf("+-")), Stringify(Many1(Range('0', '9')))),
-		func(res interface{}) interface{} {
+		func(res interface{}) (interface{}, error) {
 			parts := res.([]interface{})
 			negated := false
 			if sign, ok := parts[0].(byte); ok {
@@ -39,7 +39,7 @@ func buildJSONParser() *Grammar {
 			if negated {
 				total = -total
 			}
-			return total
+			return total, nil
 		})
 
 	g.AddSymbol("comma", Seq(Symbol("ws"), Literal(","), Symbol("ws")))
@@ -48,22 +48,22 @@ func buildJSONParser() *Grammar {
 		SeqAt(2, Literal("{"), Symbol("ws"),
 			SepBy(Symbol("keyValue"), Symbol("comma")),
 			Symbol("ws"), Literal("}")),
-		func(res interface{}) interface{} {
+		func(res interface{}) (interface{}, error) {
 			out := make(map[string]interface{})
 			pairs := res.([]interface{})
 			for _, p0 := range pairs {
 				p := p0.(keyValue)
 				out[p.key] = p.value
 			}
-			return out
+			return out, nil
 		})
 
 	g.WithAction("keyValue",
 		Seq(Symbol("string"), Symbol("ws"), Literal(":"),
 			Symbol("ws"), Symbol("jsonValue")),
-		func(res interface{}) interface{} {
+		func(res interface{}) (interface{}, error) {
 			parts := res.([]interface{})
-			return keyValue{parts[0].(string), parts[4]}
+			return keyValue{parts[0].(string), parts[4]}, nil
 		})
 
 	g.AddSymbol("array",
