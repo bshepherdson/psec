@@ -10,7 +10,54 @@ import (
 type Parser interface {
 	// Parse consumes a Stream and symbolTable and returns a new Stream on success,
 	// and nil on failure.
-	Parse(Stream, symbolTable) Stream
+	Parse(Stream, symbolTable) (Stream, *parseError)
+}
+
+type parseError struct {
+	expected []string
+	message  string
+	loc      *Loc
+}
+
+func (l *Loc) mkErrorExpectations(expected []string) *parseError {
+	return &parseError{
+		expected: expected,
+		loc:      l,
+	}
+}
+
+func (l *Loc) mkErrorExpect(expect string, args ...interface{}) *parseError {
+	return l.mkErrorExpectations([]string{fmt.Sprintf(expect, args...)})
+}
+
+func (l *Loc) mkErrorMessage(msg string, args ...interface{}) *parseError {
+	return &parseError{
+		message: fmt.Sprintf(msg, args...),
+		loc:     l,
+	}
+}
+
+func (e *parseError) Error() string {
+	prefix := fmt.Sprintf("%s line %d col %d",
+		e.loc.Filename, e.loc.Line, e.loc.Col)
+
+	if len(e.expected) == 1 {
+		if e.message == "" {
+			return fmt.Sprintf("%s: expected %s", prefix, e.expected[0])
+		} else {
+			return fmt.Sprintf("%s: %s, expected %s", prefix, e.message, e.expected[0])
+		}
+	} else if len(e.expected) > 1 {
+		if e.message == "" {
+			return fmt.Sprintf("%s: expected one of %s",
+				prefix, strings.Join(e.expected, ", "))
+		} else {
+			return fmt.Sprintf("%s: %s, expected one of %s",
+				prefix, e.message, strings.Join(e.expected, ", "))
+		}
+	} else {
+		return fmt.Sprintf("%s: %s", prefix, e.message)
+	}
 }
 
 // Action is a function type that adapts parser results from raw results to more
@@ -27,6 +74,13 @@ type Stream interface {
 	Tail() Stream
 	Value() interface{}
 	SetValue(interface{}) Stream
+	Loc() *Loc
+}
+
+type Loc struct {
+	Filename string
+	Line     int
+	Col      int
 }
 
 // The string is immutable and we have an index into it.
@@ -34,10 +88,13 @@ type Stream interface {
 // stringPS is treated as immutable; that's why Tail() and SetValue()
 // both return a new Stream.
 type stringPS struct {
-	str   string
-	pos   uint
-	value interface{}
-	tail  *stringPS
+	str      string
+	pos      uint
+	filename string
+	line     int
+	col      int
+	value    interface{}
+	tail     *stringPS
 }
 
 func (s *stringPS) Head() (byte, bool) {
@@ -49,7 +106,19 @@ func (s *stringPS) Head() (byte, bool) {
 
 func (s *stringPS) Tail() Stream {
 	if s.tail == nil {
-		s.tail = &stringPS{s.str, s.pos + 1, nil, nil}
+		s.tail = &stringPS{
+			str:      s.str,
+			pos:      s.pos + 1,
+			filename: s.filename,
+			line:     s.line,
+			col:      s.col,
+		}
+
+		// If the character we just skipped was a newline, bump the line.
+		if s.str[s.pos] == '\n' {
+			s.tail.line = s.line + 1
+			s.tail.col = 0
+		}
 	}
 	return s.tail
 }
@@ -58,6 +127,10 @@ func (s *stringPS) SetValue(v interface{}) Stream {
 	dup := *s
 	dup.value = v
 	return &dup
+}
+
+func (s *stringPS) Loc() *Loc {
+	return &Loc{Filename: s.filename, Line: s.line, Col: s.col}
 }
 
 // The built-in Parsers themselves.
@@ -73,17 +146,17 @@ type pLiteral struct {
 	target string
 }
 
-func (p *pLiteral) Parse(ps Stream, g symbolTable) Stream {
+func (p *pLiteral) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	i := 0
 	for i < len(p.target) {
 		h, eof := ps.Head()
 		if eof || p.target[i] != h {
-			return nil
+			return nil, ps.Loc().mkErrorExpect("literal '%s'", p.target)
 		}
 		ps = ps.Tail()
 		i++
 	}
-	return ps.SetValue(p.target)
+	return ps.SetValue(p.target), nil
 }
 
 // TODO: Literal with value? I don't know how often that's actually used.
@@ -100,15 +173,15 @@ type pLiteralIC struct {
 	upcased string
 }
 
-func (p *pLiteralIC) Parse(ps Stream, g symbolTable) Stream {
+func (p *pLiteralIC) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	for i := 0; i < len(p.target); i++ {
 		h, eof := ps.Head()
 		if eof || p.upcased[i] != strings.ToUpper(string(h))[0] {
-			return nil
+			return nil, ps.Loc().mkErrorExpect("literal '%s'", p.target)
 		}
 		ps = ps.Tail()
 	}
-	return ps.SetValue(p.target)
+	return ps.SetValue(p.target), nil
 }
 
 // Alt accepts any number of parsers. It tries each one in turn. The first
@@ -122,14 +195,22 @@ type pAlt struct {
 	parsers []Parser
 }
 
-func (p *pAlt) Parse(ps Stream, g symbolTable) Stream {
+func (p *pAlt) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
+	var errs []*parseError
 	for _, inner := range p.parsers {
-		ret := inner.Parse(ps, g)
+		ret, err := inner.Parse(ps, g)
 		if ret != nil {
-			return ret
+			return ret, nil
 		}
+		errs = append(errs, err)
 	}
-	return nil
+
+	// We combine all the expectations of the inner errors together.
+	var exps []string
+	for _, err := range errs {
+		exps = append(exps, err.expected...)
+	}
+	return nil, ps.Loc().mkErrorExpectations(exps)
 }
 
 // Seq runs an list of parsers in order, one after the other.
@@ -143,16 +224,17 @@ type pSeq struct {
 	parsers []Parser
 }
 
-func (p *pSeq) Parse(ps Stream, g symbolTable) Stream {
+func (p *pSeq) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	out := make([]interface{}, len(p.parsers))
+	var err *parseError
 	for i, inner := range p.parsers {
-		ps = inner.Parse(ps, g)
-		if ps == nil {
-			return nil
+		ps, err = inner.Parse(ps, g)
+		if err != nil {
+			return nil, err
 		}
 		out[i] = ps.Value()
 	}
-	return ps.SetValue(out)
+	return ps.SetValue(out), nil
 }
 
 // SeqAt runs a list of parsers in order, one after the other.
@@ -167,18 +249,19 @@ type pSeqAt struct {
 	index   int
 }
 
-func (p *pSeqAt) Parse(ps Stream, g symbolTable) Stream {
+func (p *pSeqAt) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	var v interface{}
+	var err *parseError
 	for i, inner := range p.parsers {
-		ps = inner.Parse(ps, g)
-		if ps == nil {
-			return nil
+		ps, err = inner.Parse(ps, g)
+		if err != nil {
+			return nil, err
 		}
 		if i == p.index {
 			v = ps.Value()
 		}
 	}
-	return ps.SetValue(v)
+	return ps.SetValue(v), nil
 }
 
 // Stringify wraps another parser, and combines its output (which should be a
@@ -205,12 +288,12 @@ type pOptional struct {
 	inner Parser
 }
 
-func (p *pOptional) Parse(ps Stream, g symbolTable) Stream {
-	res := p.inner.Parse(ps, g)
+func (p *pOptional) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
+	res, _ := p.inner.Parse(ps, g)
 	if res != nil {
-		return res
+		return res, nil
 	}
-	return ps.SetValue(nil)
+	return ps.SetValue(nil), nil
 }
 
 // AnyChar parses any single character, returning it as the value.
@@ -222,12 +305,12 @@ type pAnyChar struct{}
 
 var anyCharSingleton pAnyChar
 
-func (p *pAnyChar) Parse(ps Stream, g symbolTable) Stream {
+func (p *pAnyChar) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	c, eof := ps.Head()
 	if eof {
-		return nil
+		return nil, ps.Loc().mkErrorMessage("unexpected EOF")
 	}
-	return ps.Tail().SetValue(c)
+	return ps.Tail().SetValue(c), nil
 }
 
 // OneOf matches any single character from a string of possibilities.
@@ -240,17 +323,17 @@ type pOneOf struct {
 	options string
 }
 
-func (p *pOneOf) Parse(ps Stream, g symbolTable) Stream {
+func (p *pOneOf) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	c, eof := ps.Head()
 	if eof {
-		return nil
+		return nil, ps.Loc().mkErrorMessage("unexpected EOF, expected one of '%s'", p.options)
 	}
 	for i := 0; i < len(p.options); i++ {
 		if c == p.options[i] {
-			return ps.Tail().SetValue(c)
+			return ps.Tail().SetValue(c), nil
 		}
 	}
-	return nil
+	return nil, ps.Loc().mkErrorMessage("expected one of: %s", p.options)
 }
 
 // NoneOf matches any single character NOT in a "blacklist" string.
@@ -263,17 +346,17 @@ type pNoneOf struct {
 	blacklist string
 }
 
-func (p *pNoneOf) Parse(ps Stream, g symbolTable) Stream {
+func (p *pNoneOf) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	c, eof := ps.Head()
 	if eof {
-		return nil
+		return nil, ps.Loc().mkErrorMessage("unexpected EOF")
 	}
 	for i := 0; i < len(p.blacklist); i++ {
 		if c == p.blacklist[i] {
-			return nil
+			return nil, ps.Loc().mkErrorMessage("unexpected %c", c)
 		}
 	}
-	return ps.Tail().SetValue(c)
+	return ps.Tail().SetValue(c), nil
 }
 
 // Range takes two characters (bytes) and parses any character in that range
@@ -288,12 +371,12 @@ type pRange struct {
 	lo, hi byte
 }
 
-func (p *pRange) Parse(ps Stream, g symbolTable) Stream {
+func (p *pRange) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	c, eof := ps.Head()
 	if !eof && p.lo <= c && c <= p.hi {
-		return ps.Tail().SetValue(c)
+		return ps.Tail().SetValue(c), nil
 	}
-	return nil
+	return nil, ps.Loc().mkErrorExpect("range(%c..%c)", p.lo, p.hi)
 }
 
 // Many parses 0 or more copies of its inner parser, returning an array of its
@@ -325,16 +408,18 @@ type pMany struct {
 }
 
 // Combined parser for the different flavours of Many.
-func (p *pMany) Parse(ps Stream, g symbolTable) Stream {
+func (p *pMany) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	var results []interface{}
 	if p.capture {
 		results = make([]interface{}, 0)
 	}
 
 	found := 0
+	var ps2 Stream
+	var err *parseError
 	for {
-		ps2 := p.inner.Parse(ps, g)
-		if ps2 == nil {
+		ps2, err = p.inner.Parse(ps, g)
+		if err != nil {
 			break
 		}
 		found++
@@ -346,14 +431,18 @@ func (p *pMany) Parse(ps Stream, g symbolTable) Stream {
 
 	// Check that we've got at least min results.
 	if found < p.min {
-		return nil
+		return nil, &parseError{
+			loc:      ps.Loc(),
+			message:  fmt.Sprintf("minimum %d", p.min),
+			expected: err.expected,
+		}
 	}
 
 	// Good to return.
 	if p.capture {
-		return ps.SetValue(results)
+		return ps.SetValue(results), nil
 	}
-	return ps.SetValue(nil)
+	return ps.SetValue(nil), nil
 }
 
 // SepBy matches 0 or more of one parser, separated by a second parser.
@@ -375,27 +464,29 @@ type pSepBy struct {
 	min        int
 }
 
-func (p *pSepBy) Parse(ps Stream, g symbolTable) Stream {
+func (p *pSepBy) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	results := make([]interface{}, 0)
 
 	var last Stream
+	var err error
 	for ps != nil {
 		last = ps
-		ps = p.inner.Parse(ps, g)
+		ps, err = p.inner.Parse(ps, g)
 		if ps != nil {
 			results = append(results, ps.Value())
 		} else {
 			break
 		}
 		last = ps
-		ps = p.sep.Parse(ps, g)
+		ps, err = p.sep.Parse(ps, g)
 	}
 
 	if p.min > len(results) {
-		return nil
+		return nil, ps.Loc().mkErrorMessage(
+			"expected at least %d: %v", p.min, err)
 	}
 
-	return last.SetValue(results)
+	return last.SetValue(results), nil
 }
 
 // EndBy matches 0 or more of one parser, each followed by a second parser.
@@ -415,25 +506,27 @@ type pEndBy struct {
 	min        int
 }
 
-func (p *pEndBy) Parse(ps Stream, g symbolTable) Stream {
+func (p *pEndBy) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	results := make([]interface{}, 0)
 
 	var last Stream
+	var err *parseError
 	for ps != nil {
 		last = ps
-		ps = p.inner.Parse(ps, g)
+		ps, err = p.inner.Parse(ps, g)
 		if ps == nil {
 			break
 		}
 		results = append(results, ps.Value())
-		ps = p.sep.Parse(ps, g)
+		ps, err = p.sep.Parse(ps, g)
 	}
 
 	if p.min > len(results) {
-		return nil
+		return nil, ps.Loc().mkErrorMessage(
+			"expected at least %d: %v", p.min, err)
 	}
 
-	return last.SetValue(results)
+	return last.SetValue(results), nil
 }
 
 // ManyTill finds 0 or more instances of one parser, until it finds a
@@ -458,21 +551,20 @@ type pManyTill struct {
 	inner, terminator Parser
 }
 
-func (p *pManyTill) Parse(ps Stream, g symbolTable) Stream {
+func (p *pManyTill) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	results := make([]interface{}, 0)
-	for ps != nil {
-		tps := p.terminator.Parse(ps, g)
+	for {
+		tps, err := p.terminator.Parse(ps, g)
 		if tps != nil {
-			return tps.SetValue(results)
+			return tps.SetValue(results), nil
 		}
-		ps = p.inner.Parse(ps, g)
-		if ps != nil {
-			results = append(results, ps.Value())
+		ps, err = p.inner.Parse(ps, g)
+		if err != nil {
+			return nil, ps.Loc().mkErrorMessage(
+				"failed to parse many %v", err)
 		}
+		results = append(results, ps.Value())
 	}
-
-	// If we come down here, then both the terminator and body parsers failed.
-	return nil
 }
 
 func parserWithAction(p Parser, act Action) Parser {
@@ -484,12 +576,12 @@ type pWithAction struct {
 	action Action
 }
 
-func (p *pWithAction) Parse(ps Stream, g symbolTable) Stream {
-	ps = p.inner.Parse(ps, g)
-	if ps == nil {
-		return nil
+func (p *pWithAction) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
+	ps, err := p.inner.Parse(ps, g)
+	if err != nil {
+		return nil, err
 	}
-	return ps.SetValue(p.action(ps.Value()))
+	return ps.SetValue(p.action(ps.Value())), nil
 }
 
 // Symbol runs another parser in the grammar by name.
@@ -501,7 +593,7 @@ type pSymbol struct {
 	name string
 }
 
-func (p *pSymbol) Parse(ps Stream, g symbolTable) Stream {
+func (p *pSymbol) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	if inner, ok := g[p.name]; ok {
 		return inner.Parse(ps, g)
 	}
@@ -554,14 +646,33 @@ func (g *Grammar) WithAction(name string, p Parser, action Action) {
 // It parses the input string. Returns the parse value on success, and nil on
 // failure. (That means a Value of nil can't be distinguished from failure, but
 // that's not a problem in practice.)
-func (g *Grammar) ParseString(str string) interface{} {
-	var ps Stream = &stringPS{str, 0, nil, nil}
-	if p, ok := g.symbols[g.startSymbol]; ok {
-		ps = p.Parse(ps, g.symbols)
-		if ps == nil {
-			return nil
-		}
-		return ps.Value()
+func (g *Grammar) ParseString(filename, str string) (interface{}, error) {
+	return g.ParseStringWith(filename, str, "START")
+}
+
+func (g *Grammar) ParseStringWith(filename, str, startSym string) (interface{}, error) {
+	var ps Stream = &stringPS{
+		str:      str,
+		pos:      0,
+		filename: filename,
+		line:     1,
+		col:      0,
+		value:    nil,
+		tail:     nil,
 	}
-	panic(fmt.Sprintf("start symbol '%s' does not exist", g.startSymbol))
+
+	if p, ok := g.symbols[startSym]; ok {
+		ps, err := p.Parse(ps, g.symbols)
+		if err != nil {
+			return nil, err
+		}
+
+		_, eof := ps.Head()
+		if !eof {
+			return nil, ps.Loc().mkErrorMessage("incomplete parse, expected EOF but input remains")
+		}
+
+		return ps.Value(), nil
+	}
+	panic(fmt.Sprintf("start symbol '%s' does not exist", startSym))
 }

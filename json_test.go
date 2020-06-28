@@ -82,32 +82,38 @@ type keyValue struct {
 var grammar = buildJSONParser()
 
 func TestNumberParser(t *testing.T) {
-	res := grammar.ParseString("77")
-	if n, ok := res.(int); !ok || n != 77 {
+	res, err := grammar.ParseString("test", "77")
+	if n, ok := res.(int); !ok || n != 77 || err != nil {
 		t.FailNow()
 	}
 }
 
 func TestStringParser(t *testing.T) {
-	res := grammar.ParseString("\"some string here \"")
+	res, err := grammar.ParseString("test", "\"some string here \"")
+	if err != nil {
+		t.Errorf("Error from parser: %v", err)
+	}
 	if s, ok := res.(string); !ok || s != "some string here " {
-		t.FailNow()
+		t.Errorf("Got bad string: %v", s)
 	}
 }
 
 func TestBoolean(t *testing.T) {
-	res1 := grammar.ParseString("false")
-	if s, ok := res1.(bool); !ok || s != false {
+	res1, err := grammar.ParseString("test", "false")
+	if s, ok := res1.(bool); !ok || s != false || err != nil {
 		t.FailNow()
 	}
-	res2 := grammar.ParseString("true")
-	if s, ok := res2.(bool); !ok || s != true {
+	res2, err := grammar.ParseString("test", "true")
+	if s, ok := res2.(bool); !ok || s != true || err != nil {
 		t.FailNow()
 	}
 }
 
 func TestArray(t *testing.T) {
-	res0 := grammar.ParseString("   [   77, \"str here\", false   ]   ")
+	res0, err := grammar.ParseString("test", "   [   77, \"str here\", false   ]   ")
+	if err != nil {
+		t.FailNow()
+	}
 	res := res0.([]interface{})
 
 	if len(res) != 3 {
@@ -125,7 +131,11 @@ func TestArray(t *testing.T) {
 }
 
 func TestObject(t *testing.T) {
-	res0 := grammar.ParseString("  { \"key1\" :   -19  , \"kek\":\"str\"}  ")
+	res0, err := grammar.ParseString("test", "  { \"key1\" :   -19  , \"kek\":\"str\"}  ")
+	if err != nil {
+		t.FailNow()
+	}
+
 	res := res0.(map[string]interface{})
 
 	if v, ok := res["key1"]; ok {
@@ -146,9 +156,9 @@ func TestObject(t *testing.T) {
 }
 
 func TestNestedArrays(t *testing.T) {
-	res0 := grammar.ParseString("[ 7, [0, 2] ]")
+	res0, err := grammar.ParseString("test", "[ 7, [0, 2] ]")
 	res := res0.([]interface{})
-	if n, ok := res[0].(int); !ok || n != 7 {
+	if n, ok := res[0].(int); !ok || n != 7 || err != nil {
 		t.FailNow()
 	}
 
@@ -165,11 +175,11 @@ func TestNestedArrays(t *testing.T) {
 }
 
 func TestNestedObjects(t *testing.T) {
-	res0 := grammar.ParseString("{ \"arr\": [1,-8], \"obj\":{\"k\":\"v\"}, \"empty\"  : {} }")
+	res0, err := grammar.ParseString("test", "{ \"arr\": [1,-8], \"obj\":{\"k\":\"v\"}, \"empty\"  : {} }")
 	res := res0.(map[string]interface{})
 
 	arr := res["arr"].([]interface{})
-	if n, ok := arr[0].(int); !ok || n != 1 {
+	if n, ok := arr[0].(int); !ok || n != 1 || err != nil {
 		t.FailNow()
 	}
 	if n, ok := arr[1].(int); !ok || n != -8 {
