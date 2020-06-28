@@ -62,7 +62,7 @@ func (e *parseError) Error() string {
 
 // Action is a function type that adapts parser results from raw results to more
 // meaningful results, such as AST nodes.
-type Action func(results interface{}) (interface{}, error)
+type Action func(results interface{}, loc *Loc) (interface{}, error)
 
 // symbolTable maps rule names to their parsers.
 type symbolTable map[string]Parser
@@ -81,6 +81,10 @@ type Loc struct {
 	Filename string
 	Line     int
 	Col      int
+}
+
+func (l *Loc) String() string {
+	return fmt.Sprintf("%s line %d col %d", l.Filename, l.Line, l.Col)
 }
 
 // The string is immutable and we have an index into it.
@@ -267,7 +271,7 @@ func (p *pSeqAt) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 // Stringify wraps another parser, and combines its output (which should be a
 // []byte) into a single string.
 func Stringify(p Parser) Parser {
-	return parserWithAction(p, func(raw interface{}) (interface{}, error) {
+	return parserWithAction(p, func(raw interface{}, loc *Loc) (interface{}, error) {
 		res := raw.([]interface{})
 		out := make([]byte, len(res))
 		for i, c := range res {
@@ -581,7 +585,7 @@ func (p *pWithAction) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	if err != nil {
 		return nil, err
 	}
-	res, e := p.action(ps.Value())
+	res, e := p.action(ps.Value(), ps.Loc())
 	if e != nil {
 		return nil, ps.Loc().mkErrorMessage(e.Error())
 	}
