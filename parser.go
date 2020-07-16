@@ -44,17 +44,15 @@ func (e *parseError) Error() string {
 	if len(e.expected) == 1 {
 		if e.message == "" {
 			return fmt.Sprintf("%s: expected %s", prefix, e.expected[0])
-		} else {
-			return fmt.Sprintf("%s: %s, expected %s", prefix, e.message, e.expected[0])
 		}
+		return fmt.Sprintf("%s: %s, expected %s", prefix, e.message, e.expected[0])
 	} else if len(e.expected) > 1 {
 		if e.message == "" {
 			return fmt.Sprintf("%s: expected one of %s",
 				prefix, strings.Join(e.expected, ", "))
-		} else {
-			return fmt.Sprintf("%s: %s, expected one of %s",
-				prefix, e.message, strings.Join(e.expected, ", "))
 		}
+		return fmt.Sprintf("%s: %s, expected one of %s",
+			prefix, e.message, strings.Join(e.expected, ", "))
 	} else {
 		return fmt.Sprintf("%s: %s", prefix, e.message)
 	}
@@ -75,6 +73,7 @@ type Stream interface {
 	Value() interface{}
 	SetValue(interface{}) Stream
 	Loc() *Loc
+	RemainingInput() string
 }
 
 type Loc struct {
@@ -135,6 +134,10 @@ func (s *stringPS) SetValue(v interface{}) Stream {
 
 func (s *stringPS) Loc() *Loc {
 	return &Loc{Filename: s.filename, Line: s.line, Col: s.col}
+}
+
+func (s *stringPS) RemainingInput() string {
+	return s.str[s.pos:]
 }
 
 // The built-in Parsers themselves.
@@ -214,7 +217,10 @@ func (p *pAlt) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 	for _, err := range errs {
 		exps = append(exps, err.expected...)
 	}
-	return nil, ps.Loc().mkErrorExpectations(exps)
+	//fmt.Printf("psec: alt errors %#v\n", exps)
+	retErr := ps.Loc().mkErrorExpectations(exps)
+	//fmt.Printf("psec:     %v", retErr)
+	return nil, retErr
 }
 
 // Seq runs an list of parsers in order, one after the other.
@@ -485,6 +491,15 @@ func (p *pSepBy) Parse(ps Stream, g symbolTable) (Stream, *parseError) {
 		ps, err = p.sep.Parse(ps, g)
 	}
 
+	// TODO: This swallows errors in an unfortunate way.
+	// Suppose the inner parse fails, with a meaningful error about some malformed
+	// element. We want to surface that to the user. But if we've reached the
+	// minimum count here, we simply return what we have so far and no error.
+	// It's only when we get back to the top and realize there's lots of input
+	// left that we know if error is sound.
+	// I don't know how to surface that nicely, in that case.
+	// Maybe we should hang onto the last error, if any, and return that if
+	// there's input left?
 	if p.min > len(results) {
 		return nil, ps.Loc().mkErrorMessage(
 			"expected at least %d: %v", p.min, err)
@@ -677,7 +692,7 @@ func (g *Grammar) ParseStringWith(filename, str, startSym string) (interface{}, 
 
 		_, eof := ps.Head()
 		if !eof {
-			return nil, ps.Loc().mkErrorMessage("incomplete parse, expected EOF but input remains")
+			return nil, ps.Loc().mkErrorMessage("incomplete parse, expected EOF but input remains: %s", ps.RemainingInput())
 		}
 
 		return ps.Value(), nil
